@@ -1,5 +1,8 @@
-# Core only - OCP installed via conda
+# Core
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 python-multipart==0.0.12
 numpy==1.26.4
+
+# CAD Processing - using trimesh for lighter weight
+trimesh==4.4.0
