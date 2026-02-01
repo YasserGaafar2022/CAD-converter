@@ -31,8 +31,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Supported file extensions
-SUPPORTED_EXTENSIONS = {'.step', '.stp', '.iges', '.igs'}
+# Supported file extensions - formats trimesh handles well
+SUPPORTED_EXTENSIONS = {'.step', '.stp', '.iges', '.igs', '.stl', '.obj', '.glb', '.gltf', '.ply', '.off'}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
