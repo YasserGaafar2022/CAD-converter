@@ -1,33 +1,15 @@
-# Multi-stage build for smaller image
-FROM python:3.11-slim as builder
+# Use cadquery base image which includes OCP
+FROM continuumio/miniconda3:latest
 
 WORKDIR /app
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+# Install OCP via conda (much easier than pip)
+RUN conda install -c conda-forge -c cadquery cadquery=master -y && \
+    conda clean -afy
 
-# Copy requirements and install
+# Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
-
-# Production stage
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy installed packages from builder
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+RUN pip install --no-cache-dir fastapi uvicorn python-multipart numpy
 
 # Copy application code
 COPY app ./app
@@ -36,7 +18,7 @@ COPY app ./app
 EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 # Run the app
