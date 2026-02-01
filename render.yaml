@@ -1,0 +1,10 @@
+# Render.com deployment configuration
+services:
+  - type: web
+    name: cad-converter
+    env: docker
+    plan: starter  # or free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
