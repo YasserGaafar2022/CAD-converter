@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: graviton-aps-backend
+    runtime: docker
+    repo: https://github.com/YasserGaafar2022/graviton-aps-backend
+    branch: main
+    envVars:
+      - key: APS_CLIENT_ID
+        sync: false
+      - key: APS_CLIENT_SECRET
+        sync: false
+      - key: APS_BUCKET_KEY
+        value: graviton-cad-viewer-bucket

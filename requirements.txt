@@ -1,0 +1,17 @@
+# Autodesk Platform Services Backend Dependencies
+
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# HTTP requests
+requests==2.32.3
+
+# Environment variables
+python-dotenv==1.0.1
+
+# File handling
+python-multipart==0.0.19
+
+# CORS for mobile apps
+aiofiles==24.1.0
