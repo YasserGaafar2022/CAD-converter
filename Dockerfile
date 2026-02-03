@@ -9,7 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY main.py .
 COPY static/ static/
-COPY .env .env
+
+# Environment variables are set in Render.com dashboard
+# Do NOT copy .env file - it should be in .gitignore
 
 # Expose port
 EXPOSE 8000
