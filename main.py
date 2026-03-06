@@ -56,13 +56,22 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration for mobile app
+# CORS configuration — restrict to known origins
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "").split(",") if os.getenv("ALLOWED_ORIGINS") else [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:3000",
+    "https://localhost",
+    "capacitor://localhost",   # Capacitor Android/iOS
+    "https://graviton-omniview.web.app",  # Production (update as needed)
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # ============================================================================
@@ -557,6 +566,165 @@ async def api_delete_model(object_key: str):
         )
     
     return {"message": f"Model {object_key} deleted successfully"}
+
+
+# ============================================================================
+# Download Converted Model
+# ============================================================================
+
+def start_derivative_export(access_token: str, urn: str, output_format: str = "step") -> dict:
+    """
+    Start a derivative export job to convert the model to STEP/OBJ/STL.
+    Uses the APS Model Derivative API.
+    """
+    job_payload = {
+        "input": {
+            "urn": urn
+        },
+        "output": {
+            "formats": [
+                {
+                    "type": output_format
+                }
+            ]
+        }
+    }
+    
+    response = requests.post(
+        APS_TRANSLATE_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "x-ads-force": "true"
+        },
+        json=job_payload
+    )
+    
+    if response.status_code not in [200, 201]:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start {output_format} export: {response.text}"
+        )
+    
+    return response.json()
+
+
+def find_derivative_download(access_token: str, urn: str, output_format: str = "step") -> Optional[str]:
+    """
+    Search the manifest for a downloadable derivative of the target format.
+    Returns the derivative URN/URL if found, None otherwise.
+    """
+    manifest_url = f"https://developer.api.autodesk.com/modelderivative/v2/designdata/{urn}/manifest"
+    response = requests.get(
+        manifest_url,
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
+    
+    if response.status_code != 200:
+        return None
+    
+    data = response.json()
+    derivatives = data.get("derivatives", [])
+    
+    for deriv in derivatives:
+        output_type = deriv.get("outputType", "").lower()
+        if output_type == output_format.lower():
+            children = deriv.get("children", [])
+            for child in children:
+                if child.get("type") == "resource" and "urn" in child:
+                    return child["urn"]
+    
+    return None
+
+
+@app.get("/api/models/{urn}/download")
+async def api_download_model(urn: str, format: str = "step"):
+    """
+    Download a converted model file (STEP, OBJ, or STL).
+    
+    1. Starts a derivative export if not already done
+    2. Polls until the derivative is ready
+    3. Downloads and returns the file
+    """
+    try:
+        access_token = get_internal_token()
+        
+        # Start derivative export
+        start_derivative_export(access_token, urn, format)
+        
+        # Poll for completion (max 5 minutes)
+        import asyncio
+        max_attempts = 60
+        for attempt in range(max_attempts):
+            status = get_translation_status(access_token, urn)
+            
+            if status["status"] == "success":
+                break
+            elif status["status"] == "failed":
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Model conversion to {format} failed"
+                )
+            
+            await asyncio.sleep(5)
+        else:
+            raise HTTPException(
+                status_code=504,
+                detail="Conversion timed out after 5 minutes"
+            )
+        
+        # Find the derivative download URL
+        derivative_urn = find_derivative_download(access_token, urn, format)
+        
+        if not derivative_urn:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No {format} derivative found. The model may not support {format} export."
+            )
+        
+        # Download the derivative file
+        import urllib.parse
+        encoded_deriv = urllib.parse.quote(derivative_urn, safe='')
+        download_url = f"https://developer.api.autodesk.com/modelderivative/v2/designdata/{urn}/manifest/{encoded_deriv}"
+        
+        download_response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            stream=True
+        )
+        
+        if download_response.status_code != 200:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to download derivative: {download_response.status_code}"
+            )
+        
+        # Determine content type & filename
+        ext = format.lower()
+        content_type_map = {
+            "step": "application/step",
+            "obj": "application/octet-stream",
+            "stl": "application/sla",
+        }
+        content_type = content_type_map.get(ext, "application/octet-stream")
+        
+        from fastapi.responses import StreamingResponse
+        
+        return StreamingResponse(
+            download_response.iter_content(chunk_size=8192),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="model.{ext}"'
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Download error: {str(e)}"
+        )
 
 
 # Serve static files (for the viewer HTML)
