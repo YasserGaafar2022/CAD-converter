@@ -569,13 +569,13 @@ async def api_delete_model(object_key: str):
 
 
 # ============================================================================
-# Download Converted Model
+# Download Converted Model (OBJ extraction from APS)
 # ============================================================================
 
-def start_derivative_export(access_token: str, urn: str, output_format: str = "step") -> dict:
+def request_obj_translation(access_token: str, urn: str) -> dict:
     """
-    Start a derivative export job to convert the model to STEP/OBJ/STL.
-    Uses the APS Model Derivative API.
+    Request OBJ translation from APS Model Derivative API.
+    This creates an OBJ derivative alongside the existing SVF.
     """
     job_payload = {
         "input": {
@@ -584,12 +584,13 @@ def start_derivative_export(access_token: str, urn: str, output_format: str = "s
         "output": {
             "formats": [
                 {
-                    "type": output_format
+                    "type": "obj"
                 }
             ]
         }
     }
     
+    print(f"[Download] Requesting OBJ translation for URN: {urn}")
     response = requests.post(
         APS_TRANSLATE_URL,
         headers={
@@ -600,19 +601,17 @@ def start_derivative_export(access_token: str, urn: str, output_format: str = "s
         json=job_payload
     )
     
+    print(f"[Download] OBJ translation response: {response.status_code}")
     if response.status_code not in [200, 201]:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to start {output_format} export: {response.text}"
-        )
+        print(f"[Download] OBJ translation error: {response.text}")
     
-    return response.json()
+    return {"status_code": response.status_code, "body": response.text}
 
 
-def find_derivative_download(access_token: str, urn: str, output_format: str = "step") -> Optional[str]:
+def find_any_downloadable(access_token: str, urn: str) -> Optional[dict]:
     """
-    Search the manifest for a downloadable derivative of the target format.
-    Returns the derivative URN/URL if found, None otherwise.
+    Search the manifest for any downloadable geometry resource (OBJ, SVF mesh, etc.)
+    Returns dict with 'urn' and 'type' if found.
     """
     manifest_url = f"https://developer.api.autodesk.com/modelderivative/v2/designdata/{urn}/manifest"
     response = requests.get(
@@ -621,106 +620,118 @@ def find_derivative_download(access_token: str, urn: str, output_format: str = "
     )
     
     if response.status_code != 200:
+        print(f"[Download] Manifest fetch failed: {response.status_code}")
         return None
     
     data = response.json()
+    print(f"[Download] Manifest status: {data.get('status')}, progress: {data.get('progress')}")
     derivatives = data.get("derivatives", [])
     
+    # First, look for OBJ derivatives
     for deriv in derivatives:
         output_type = deriv.get("outputType", "").lower()
-        if output_type == output_format.lower():
+        status = deriv.get("status", "")
+        print(f"[Download] Found derivative: type={output_type}, status={status}")
+        
+        if output_type == "obj" and status == "success":
             children = deriv.get("children", [])
             for child in children:
-                if child.get("type") == "resource" and "urn" in child:
-                    return child["urn"]
+                if "urn" in child:
+                    print(f"[Download] Found OBJ resource: {child.get('urn', '')[:80]}")
+                    return {"urn": child["urn"], "type": "obj"}
+    
+    # Fallback: look for any downloadable resource in SVF derivatives
+    for deriv in derivatives:
+        output_type = deriv.get("outputType", "").lower()
+        if output_type in ("svf", "svf2") and deriv.get("status") == "success":
+            children = deriv.get("children", [])
+            for child in children:
+                child_type = child.get("type", "")
+                role = child.get("role", "")
+                if role == "3d" and "children" in child:
+                    # Look for geometry resources
+                    for grandchild in child["children"]:
+                        if grandchild.get("type") == "resource" and "urn" in grandchild:
+                            print(f"[Download] Found SVF resource: role={grandchild.get('role')}")
+                            return {"urn": grandchild["urn"], "type": "svf_resource"}
     
     return None
 
 
 @app.get("/api/models/{urn}/download")
-async def api_download_model(urn: str, format: str = "step"):
+async def api_download_model(urn: str, format: str = "obj"):
     """
-    Download a converted model file (STEP, OBJ, or STL).
+    Download a converted model file from APS.
     
-    1. Starts a derivative export if not already done
-    2. Polls until the derivative is ready
-    3. Downloads and returns the file
+    Flow:
+    1. Check if OBJ derivative already exists
+    2. If not, request OBJ translation and poll
+    3. Download the derivative resource
     """
+    import asyncio
+    import urllib.parse
+    from fastapi.responses import StreamingResponse
+    
     try:
         access_token = get_internal_token()
+        print(f"[Download] Starting download for URN: {urn}, format: {format}")
         
-        # Start derivative export
-        start_derivative_export(access_token, urn, format)
+        # Check if derivative already exists
+        result = find_any_downloadable(access_token, urn)
         
-        # Poll for completion (max 5 minutes)
-        import asyncio
-        max_attempts = 60
-        for attempt in range(max_attempts):
-            status = get_translation_status(access_token, urn)
+        if not result:
+            # Request OBJ translation
+            print("[Download] No derivative found, requesting OBJ translation...")
+            request_obj_translation(access_token, urn)
             
-            if status["status"] == "success":
-                break
-            elif status["status"] == "failed":
+            # Poll for completion (max 5 minutes)
+            max_attempts = 60
+            for attempt in range(max_attempts):
+                print(f"[Download] Polling attempt {attempt + 1}/{max_attempts}")
+                result = find_any_downloadable(access_token, urn)
+                if result:
+                    print(f"[Download] Derivative ready: {result['type']}")
+                    break
+                await asyncio.sleep(5)
+            
+            if not result:
                 raise HTTPException(
-                    status_code=500,
-                    detail=f"Model conversion to {format} failed"
+                    status_code=504,
+                    detail="Model conversion timed out. The model may be too complex or the format may not support OBJ export."
                 )
-            
-            await asyncio.sleep(5)
-        else:
-            raise HTTPException(
-                status_code=504,
-                detail="Conversion timed out after 5 minutes"
-            )
-        
-        # Find the derivative download URL
-        derivative_urn = find_derivative_download(access_token, urn, format)
-        
-        if not derivative_urn:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No {format} derivative found. The model may not support {format} export."
-            )
         
         # Download the derivative file
-        import urllib.parse
+        derivative_urn = result["urn"]
         encoded_deriv = urllib.parse.quote(derivative_urn, safe='')
         download_url = f"https://developer.api.autodesk.com/modelderivative/v2/designdata/{urn}/manifest/{encoded_deriv}"
         
+        print(f"[Download] Downloading from: {download_url[:100]}...")
         download_response = requests.get(
             download_url,
             headers={"Authorization": f"Bearer {access_token}"},
             stream=True
         )
         
+        print(f"[Download] Download response: {download_response.status_code}, size: {download_response.headers.get('content-length', 'unknown')}")
+        
         if download_response.status_code != 200:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to download derivative: {download_response.status_code}"
+                detail=f"Failed to download derivative: {download_response.status_code} - {download_response.text[:200]}"
             )
-        
-        # Determine content type & filename
-        ext = format.lower()
-        content_type_map = {
-            "step": "application/step",
-            "obj": "application/octet-stream",
-            "stl": "application/sla",
-        }
-        content_type = content_type_map.get(ext, "application/octet-stream")
-        
-        from fastapi.responses import StreamingResponse
         
         return StreamingResponse(
             download_response.iter_content(chunk_size=8192),
-            media_type=content_type,
+            media_type="application/octet-stream",
             headers={
-                "Content-Disposition": f'attachment; filename="model.{ext}"'
+                "Content-Disposition": f'attachment; filename="model.obj"'
             }
         )
         
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[Download] Error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Download error: {str(e)}"
